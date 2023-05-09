@@ -11,7 +11,7 @@ import copy
 from argoverse.data_loading.argoverse_forecasting_loader import ArgoverseForecastingLoader
 from argoverse.map_representation.map_api import ArgoverseMap
 from skimage.transform import rotate
-
+# import pickle
 
 class ArgoDataset(Dataset):
     def __init__(self, split, config, train=True):
@@ -21,6 +21,9 @@ class ArgoDataset(Dataset):
         if 'preprocess' in config and config['preprocess']:
             if train:
                 self.split = np.load(self.config['preprocess_train'], allow_pickle=True)
+                # self.split = np.load(self.config['preprocess_train'], allow_pickle=True,mmap_mode="r")
+                # self.split = pickle.load(self.config['preprocess_train'])
+
             else:
                 self.split = np.load(self.config['preprocess_val'], allow_pickle=True)
         else:
@@ -213,7 +216,7 @@ class ArgoDataset(Dataset):
         data['has_preds'] = has_preds
         return data
 
- 
+
     def get_lane_graph(self, data):
         """Get a rectangle area defined by pred_range."""
         x_min, x_max, y_min, y_max = self.config['pred_range']

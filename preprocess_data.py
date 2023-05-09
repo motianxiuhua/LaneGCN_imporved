@@ -44,8 +44,8 @@ def main():
     config, *_ = model.get_model()
 
     config["preprocess"] = False  # we use raw data to generate preprocess data
-    config["val_workers"] = 32
-    config["workers"] = 32
+    config["val_workers"] = 28
+    config["workers"] = 28
     config['cross_dist'] = 6
     config['cross_angle'] = 0.5 * np.pi
 
@@ -53,9 +53,11 @@ def main():
 
 
 
-    val(config)
-    test(config)
+#    val(config)
+#    test(config)
+    print("train process")
     train(config)
+    print("train process done")
 
 
 def train(config):

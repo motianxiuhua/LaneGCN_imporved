@@ -23,7 +23,7 @@ sys.path.insert(0, root_path)
 
 parser = argparse.ArgumentParser(description="Fuse Detection in Pytorch")
 parser.add_argument(
-    "-m", "--model", default="model", type=str, metavar="MODEL", help="model name"
+    "-m", "--model", default="lanegcn", type=str, metavar="MODEL", help="model name"
 )
 parser.add_argument("--eval", action="store_true")
 parser.add_argument(
@@ -101,8 +101,10 @@ def main():
         worker_init_fn=worker_init_fn,
         drop_last=True,
     )
+    # for i in train_loader:
+    #     print(i)
 
-    # Data loader for evaluation
+    # Data loader for evaluation   
     dataset = Dataset(config["val_split"], config, train=False)
     val_loader = DataLoader(
         dataset,
@@ -128,7 +130,7 @@ def worker_init_fn(pid):
 
 
 def train(epoch, config, train_loader, net, loss, post_process, opt, val_loader=None):
-    train_loader.sampler.set_epoch(int(epoch))
+    # train_loader.sampler.set_epoch(int(epoch)) # for distributed traning 
     net.train()
 
     num_batches = len(train_loader)

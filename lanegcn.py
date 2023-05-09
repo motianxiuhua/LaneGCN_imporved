@@ -31,7 +31,7 @@ config["display_iters"] = 205942
 config["val_iters"] = 205942 * 2
 config["save_freq"] = 1.0
 config["epoch"] = 0
-config["horovod"] = True
+config["horovod"] = False
 config["opt"] = "adam"
 config["num_epochs"] = 36
 config["lr"] = [1e-3, 1e-4]
@@ -126,13 +126,13 @@ class Net(nn.Module):
 
     def forward(self, data: Dict) -> Dict[str, List[Tensor]]:
         # construct actor feature
-        actors, actor_idcs = actor_gather(gpu(data["feats"]))
-        actor_ctrs = gpu(data["ctrs"])
-        actors = self.actor_net(actors)
+        actors, actor_idcs = actor_gather(gpu(data["feats"])) # $data["feats"]$: two neighbouring coordinate D-value in body frame
+        actor_ctrs = gpu(data["ctrs"]) # $data["ctrs"]$: coordinate in body frame
+        actors = self.actor_net(actors) # $actor_net$ only extratct data from $data["feats"]$ 
 
         # construct map features
         graph = graph_gather(to_long(gpu(data["graph"])))
-        nodes, node_idcs, node_ctrs = self.map_net(graph)
+        nodes, node_idcs, node_ctrs = self.map_net(graph) # extract data from $graph["ctrs"]$ $graph["feats"]$ and neighbouring node
 
         # actor-map fusion cycle 
         nodes = self.a2m(nodes, graph, actors, actor_idcs, actor_ctrs)
@@ -151,13 +151,15 @@ class Net(nn.Module):
         return out
 
 
-
+# Pack a list of actor
+# according to batch_size to catencate $actors$
+# return actors and the index of every actor $actor_idcs$ 
 def actor_gather(actors: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
     batch_size = len(actors)
     num_actors = [len(x) for x in actors]
 
     actors = [x.transpose(1, 2) for x in actors]
-    actors = torch.cat(actors, 0)
+    actors = torch.cat(actors, 0) # according 0th dim to catencate data
 
     actor_idcs = []
     count = 0
@@ -170,9 +172,9 @@ def actor_gather(actors: List[Tensor]) -> Tuple[Tensor, List[Tensor]]:
 
 def graph_gather(graphs):
     batch_size = len(graphs)
-    node_idcs = []
+    node_idcs = [] # index for every sample, because every sample in batch is different
     count = 0
-    counts = []
+    counts = [] # compute size of every sample
     for i in range(batch_size):
         counts.append(count)
         idcs = torch.arange(count, count + graphs[i]["num_nodes"]).to(
@@ -183,11 +185,16 @@ def graph_gather(graphs):
 
     graph = dict()
     graph["idcs"] = node_idcs
-    graph["ctrs"] = [x["ctrs"] for x in graphs]
-
+    graph["ctrs"] = [x["ctrs"] for x in graphs] # average coordinate of starting node and ending node
+    # "feats", "turn", "control", "intersect" represents ending node subtract starting node,
+    #  left/right/staight(10/01/00), traffic light(0/1), intersect(0/1)
     for key in ["feats", "turn", "control", "intersect"]:
-        graph[key] = torch.cat([x[key] for x in graphs], 0)
+        graph[key] = torch.cat([x[key] for x in graphs], 0) # catenate every sample in batch size
 
+    # graphs[j][k1][i][k2]: $j$ batch size index, $k1$ predecessor or sucessor, 
+    # $i$ matrix size is 6, 1-6 times $k1$, $k2$ 'v' is the predecessor of 'u' if $k1$ is predecessor,
+    # otherwise,'v' is the sucessor of 'u' 
+    # indedx for graph $pre$ $suc$ node in batch size
     for k1 in ["pre", "suc"]:
         graph[k1] = []
         for i in range(len(graphs[0]["pre"])):
@@ -196,7 +203,7 @@ def graph_gather(graphs):
                 graph[k1][i][k2] = torch.cat(
                     [graphs[j][k1][i][k2] + counts[j] for j in range(batch_size)], 0
                 )
-
+    # indedx for graph $left$ $right$ node in batch size
     for k1 in ["left", "right"]:
         graph[k1] = dict()
         for k2 in ["u", "v"]:
@@ -208,7 +215,7 @@ def graph_gather(graphs):
             graph[k1][k2] = torch.cat(temp)
     return graph
 
-
+# $__init__$: define network, $forward$: define connection
 class ActorNet(nn.Module):
     """
     Actor feature extractor with Conv1D
@@ -250,11 +257,14 @@ class ActorNet(nn.Module):
         out = actors
 
         outputs = []
+        # groups is the longtitual model of ActorNet, a list of three Sequential block
+        # every Sequential contain two ResBlock
         for i in range(len(self.groups)):
             out = self.groups[i](out)
             outputs.append(out)
 
-        out = self.lateral[-1](outputs[-1])
+        out = self.lateral[-1](outputs[-1]) # lateral network 
+        # upsample and sum
         for i in range(len(outputs) - 2, -1, -1):
             out = F.interpolate(out, scale_factor=2, mode="linear", align_corners=False)
             out += self.lateral[i](outputs[i])
@@ -321,9 +331,9 @@ class MapNet(nn.Module):
                 temp.new().resize_(0),
             )
 
-        ctrs = torch.cat(graph["ctrs"], 0)
-        feat = self.input(ctrs)
-        feat += self.seg(graph["feats"])
+        ctrs = torch.cat(graph["ctrs"], 0) # catencate node position
+        feat = self.input(ctrs) # MLP_loc(v)
+        feat += self.seg(graph["feats"]) # MLP_shape(v^end-v^start) + MLP_loc(v)
         feat = self.relu(feat)
 
         """fuse map"""
@@ -338,7 +348,7 @@ class MapNet(nn.Module):
                         0,
                         graph[k1][k2]["u"],
                         self.fuse[key][i](feat[graph[k1][k2]["v"]]),
-                    )
+                    ) # add $pre$ or $suc$ $v$ according to the position of $v$ index
 
             if len(graph["left"]["u"] > 0):
                 temp.index_add_(
@@ -604,14 +614,14 @@ class PredNet(nn.Module):
         for i in range(len(self.pred)):
             preds.append(self.pred[i](actors))
         reg = torch.cat([x.unsqueeze(1) for x in preds], 1)
-        reg = reg.view(reg.size(0), reg.size(1), -1, 2)
+        reg = reg.view(reg.size(0), reg.size(1), -1, 2) # 488*6*30*2
 
         for i in range(len(actor_idcs)):
             idcs = actor_idcs[i]
             ctrs = actor_ctrs[i].view(-1, 1, 1, 2)
-            reg[idcs] = reg[idcs] + ctrs
+            reg[idcs] = reg[idcs] + ctrs # relative position + current position
 
-        dest_ctrs = reg[:, :, -1].detach()
+        dest_ctrs = reg[:, :, -1].detach() # detach last predicted value
         feats = self.att_dest(actors, torch.cat(actor_ctrs, 0), dest_ctrs)
         cls = self.cls(feats).view(-1, self.config["num_mods"])
 
@@ -619,7 +629,7 @@ class PredNet(nn.Module):
         row_idcs = torch.arange(len(sort_idcs)).long().to(sort_idcs.device)
         row_idcs = row_idcs.view(-1, 1).repeat(1, sort_idcs.size(1)).view(-1)
         sort_idcs = sort_idcs.view(-1)
-        reg = reg[row_idcs, sort_idcs].view(cls.size(0), cls.size(1), -1, 2)
+        reg = reg[row_idcs, sort_idcs].view(cls.size(0), cls.size(1), -1, 2) # according to cls to sort reg
 
         out = dict()
         out["cls"], out["reg"] = [], []
@@ -673,15 +683,15 @@ class Att(nn.Module):
         hi, wi = [], []
         hi_count, wi_count = 0, 0
         for i in range(batch_size):
-            dist = agt_ctrs[i].view(-1, 1, 2) - ctx_ctrs[i].view(1, -1, 2)
-            dist = torch.sqrt((dist ** 2).sum(2))
+            dist = agt_ctrs[i].view(-1, 1, 2) - ctx_ctrs[i].view(1, -1, 2) # 错位相减 [612,1,2]-[1,5,2]=[612,5,2]
+            dist = torch.sqrt((dist ** 2).sum(2)) # 计算l2距离 [612,5,2]->[612,5]
             mask = dist <= dist_th
 
             idcs = torch.nonzero(mask, as_tuple=False)
             if len(idcs) == 0:
                 continue
 
-            hi.append(idcs[:, 0] + hi_count)
+            hi.append(idcs[:, 0] + hi_count) # index for every sample in batch size
             wi.append(idcs[:, 1] + wi_count)
             hi_count += len(agt_idcs[i])
             wi_count += len(ctx_idcs[i])
@@ -690,17 +700,17 @@ class Att(nn.Module):
 
         agt_ctrs = torch.cat(agt_ctrs, 0)
         ctx_ctrs = torch.cat(ctx_ctrs, 0)
-        dist = agt_ctrs[hi] - ctx_ctrs[wi]
+        dist = agt_ctrs[hi] - ctx_ctrs[wi] # only consider l2 distance below the threshold
         dist = self.dist(dist)
 
         query = self.query(agts[hi])
 
         ctx = ctx[wi]
-        ctx = torch.cat((dist, query, ctx), 1)
+        ctx = torch.cat((dist, query, ctx), 1) # TODO为什么这里的attention只有线性连接？
         ctx = self.ctx(ctx)
 
         agts = self.agt(agts)
-        agts.index_add_(0, hi, ctx)
+        agts.index_add_(0, hi, ctx) # if a2m, only replace map feature which actor affect, if m2a otherwise.
         agts = self.norm(agts)
         agts = self.relu(agts)
 
@@ -728,11 +738,11 @@ class AttDest(nn.Module):
         n_agt = agts.size(1)
         num_mods = dest_ctrs.size(1)
 
-        dist = (agt_ctrs.unsqueeze(1) - dest_ctrs).view(-1, 2)
+        dist = (agt_ctrs.unsqueeze(1) - dest_ctrs).view(-1, 2) # relative position
         dist = self.dist(dist)
         agts = agts.unsqueeze(1).repeat(1, num_mods, 1).view(-1, n_agt)
 
-        agts = torch.cat((dist, agts), 1)
+        agts = torch.cat((dist, agts), 1) # catencate
         agts = self.agt(agts)
         return agts
 
